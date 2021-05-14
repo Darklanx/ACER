@@ -55,7 +55,7 @@ def test(rank, args, T, shared_model):
 
           # Calculate policy
           with torch.no_grad():
-            policy, _, _, (hx, cx) = model(state, (hx, cx))
+            policy, _, _, (hx, cx), _ = model(state, (hx, cx))
 
           # Choose action greedily
           action = policy.max(1)[1][0]
@@ -72,7 +72,6 @@ def test(rank, args, T, shared_model):
             avg_rewards.append(reward_sum)
             avg_episode_lengths.append(episode_length)
             break
-
       print(('[{}] Step: {:<' + l + '} Avg. Reward: {:<8} Avg. Episode Length: {:<8}').format(
             datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3],
             t_start,
@@ -102,6 +101,7 @@ def test(rank, args, T, shared_model):
       steps.append(t_start)
       plot_line(steps, rewards, save_dir)  # Plot rewards
       torch.save(model.state_dict(), os.path.join(save_dir, 'model.pth'))  # Save model params
+    #   torch.save(model.state_dict(), os.path.join(save_dir, 'model_{}.pth'.format(t_start)))  # Save model params
       can_test = False  # Finish testing
     else:
       if T.value() - t_start >= args.evaluation_interval:

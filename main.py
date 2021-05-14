@@ -15,15 +15,16 @@ from utils import Counter
 
 
 parser = argparse.ArgumentParser(description='ACER')
+parser.add_argument('--KL', action="store_true")
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
-parser.add_argument('--num-processes', type=int, default=6, metavar='N', help='Number of training async agents (does not include single validation agent)')
-parser.add_argument('--T-max', type=int, default=500000, metavar='STEPS', help='Number of training steps')
-parser.add_argument('--t-max', type=int, default=100, metavar='STEPS', help='Max number of forward steps for A3C before update')
-parser.add_argument('--max-episode-length', type=int, default=500, metavar='LENGTH', help='Maximum episode length')
-parser.add_argument('--hidden-size', type=int, default=32, metavar='SIZE', help='Hidden size of LSTM cell')
+parser.add_argument('--num-processes', type=int, default=16, metavar='N', help='Number of training async agents (does not include single validation agent)')
+parser.add_argument('--T-max', type=int, default=5000000, metavar='STEPS', help='Number of training steps')
+parser.add_argument('--t-max', type=int, default=20, metavar='STEPS', help='Max number of forward steps for A3C before update')
+parser.add_argument('--max-episode-length', type=int, default=900000000, metavar='LENGTH', help='Maximum episode length')
+parser.add_argument('--hidden-size', type=int, default=512, metavar='SIZE', help='Hidden size of LSTM cell')
 parser.add_argument('--model', type=str, metavar='PARAMS', help='Pretrained model (state dict)')
 parser.add_argument('--on-policy', action='store_true', help='Use pure on-policy training (A3C)')
-parser.add_argument('--memory-capacity', type=int, default=100000, metavar='CAPACITY', help='Experience replay memory capacity')
+parser.add_argument('--memory-capacity', type=int, default=500000, metavar='CAPACITY', help='Experience replay memory capacity')
 parser.add_argument('--replay-ratio', type=int, default=4, metavar='r', help='Ratio of off-policy to on-policy updates')
 parser.add_argument('--replay-start', type=int, default=20000, metavar='EPISODES', help='Number of transitions to save before starting off-policy training')
 parser.add_argument('--discount', type=float, default=0.99, metavar='γ', help='Discount factor')
@@ -37,14 +38,14 @@ parser.add_argument('--lr', type=float, default=0.0007, metavar='η', help='Lear
 parser.add_argument('--lr-decay', action='store_true', help='Linearly decay learning rate to 0')
 parser.add_argument('--rmsprop-decay', type=float, default=0.99, metavar='α', help='RMSprop decay factor')
 parser.add_argument('--batch-size', type=int, default=16, metavar='SIZE', help='Off-policy batch size')
-parser.add_argument('--entropy-weight', type=float, default=0.0001, metavar='β', help='Entropy regularisation weight')
+parser.add_argument('--entropy-weight', type=float, default=0.001, metavar='β', help='Entropy regularisation weight')
 parser.add_argument('--max-gradient-norm', type=float, default=40, metavar='VALUE', help='Gradient L2 normalisation')
 parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
 parser.add_argument('--evaluation-interval', type=int, default=25000, metavar='STEPS', help='Number of training steps between evaluations (roughly)')
 parser.add_argument('--evaluation-episodes', type=int, default=10, metavar='N', help='Number of evaluation episodes to average over')
 parser.add_argument('--render', action='store_true', help='Render evaluation agent')
 parser.add_argument('--name', type=str, default='results', help='Save folder')
-parser.add_argument('--env', type=str, default='CartPole-v1',help='environment name')
+parser.add_argument('--env', type=str, default='BreakoutNoFrameskip-v4',help='environment name')
 
 
 if __name__ == '__main__':
@@ -72,12 +73,17 @@ if __name__ == '__main__':
   gym.logger.set_level(gym.logger.ERROR)  # Disable Gym warnings
 
   # Create shared network
-  env = gym.make(args.env)
+  env = gym.make(args.env).env
   shared_model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
   shared_model.share_memory()
-  if args.model and os.path.isfile(args.model):
+  if args.model:
+    if os.path.isfile(args.model):
     # Load pretrained weights
-    shared_model.load_state_dict(torch.load(args.model))
+        shared_model.load_state_dict(torch.load(args.model))
+        print("Model loaded!")
+    else:
+        print("Model not exist!")
+        exit(-1)
   # Create average network
   shared_average_model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
   shared_average_model.load_state_dict(shared_model.state_dict())

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 import plotly
-from plotly.graph_objs import Scatter, Line
+from plotly.graph_objs import Scatter
+from plotly.graph_objs.scatter import Line
 import torch
 from torch import multiprocessing as mp
 import os
-
+import matplotlib.pyplot as plt
 # Global counter
 class Counter():
   def __init__(self):
@@ -30,6 +31,7 @@ def plot_line(xs, ys_population, save_dir):
   max_colour = 'rgb(0, 132, 180)'
   mean_colour = 'rgb(0, 172, 237)'
   std_colour = 'rgba(29, 202, 255, 0.2)'
+  tmp_colour = 'rgb(255, 0, 0)'
 
   ys = torch.tensor(ys_population)
   ys_min = ys.min(1)[0].squeeze()
@@ -39,10 +41,13 @@ def plot_line(xs, ys_population, save_dir):
   ys_upper, ys_lower = ys_mean + ys_std, ys_mean - ys_std
 
   trace_max = Scatter(x=xs, y=ys_max.numpy(), line=Line(color=max_colour, dash='dash'), name='Max')
-  trace_upper = Scatter(x=xs, y=ys_upper.numpy(), line=Line(color='transparent'), name='+1 Std. Dev.', showlegend=False)
+  trace_upper = Scatter(x=xs, y=ys_upper.numpy(), line=Line(color=tmp_colour), name='+1 Std. Dev.', showlegend=False)
   trace_mean = Scatter(x=xs, y=ys_mean.numpy(), fill='tonexty', fillcolor=std_colour, line=Line(color=mean_colour), name='Mean')
-  trace_lower = Scatter(x=xs, y=ys_lower.numpy(), fill='tonexty', fillcolor=std_colour, line=Line(color='transparent'), name='-1 Std. Dev.', showlegend=False)
+  trace_lower = Scatter(x=xs, y=ys_lower.numpy(), fill='tonexty', fillcolor=std_colour, line=Line(color=tmp_colour), name='-1 Std. Dev.', showlegend=False)
   trace_min = Scatter(x=xs, y=ys_min.numpy(), line=Line(color=max_colour, dash='dash'), name='Min')
+
+  plt.plot(xs, ys_mean)
+  plt.savefig(os.path.join(save_dir, "plot.png"))
 
   plotly.offline.plot({
     'data': [trace_upper, trace_mean, trace_lower, trace_min, trace_max],

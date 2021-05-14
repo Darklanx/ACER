@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from memory import EpisodicReplayMemory
 from model import ActorCritic
 from utils import state_to_tensor
+from torch.distributions import Categorical
 
 
 # Knuth's algorithm for generating Poisson samples
@@ -77,15 +78,19 @@ def _trust_region_loss(model, distribution, ref_distribution, loss, threshold, g
 
 
 # Trains model
-def _train(args, T, model, shared_model, shared_average_model, optimiser, policies, Qs, Vs, actions, rewards, Qret, average_policies, old_policies=None):
+def _train(args, T, model, shared_model, shared_average_model, optimiser, policies, Qs, Vs, actions, rewards, Qret, average_policies, states, thetas, old_policies=None):
   off_policy = old_policies is not None
   action_size = policies[0].size(1)
   policy_loss, value_loss = 0, 0
+  target_theta = {}
 
   # Calculate n-step returns in forward view, stepping backwards from the last state
   t = len(rewards)
   for i in reversed(range(t)):
     # Importance sampling weights ρ ← π(∙|s_i) / µ(∙|s_i); 1 for on-policy
+    state = states[i]
+    action_prob = policies[i][0][actions[i]]
+   
     if off_policy:
       rho = policies[i].detach() / old_policies[i]
     else:
@@ -95,6 +100,12 @@ def _train(args, T, model, shared_model, shared_average_model, optimiser, polici
     Qret = rewards[i] + args.discount * Qret
     # Advantage A ← Qret - V(s_i; θ)
     A = Qret - Vs[i]
+
+    if state not in target_theta:
+        target_theta[state] = thetas[i]
+    else:
+        target_theta[state] += A * (1- action_prob)
+        
 
     # Log policy log(π(a_i|s_i; θ))
     log_prob = policies[i].gather(1, actions[i]).log()
@@ -117,10 +128,12 @@ def _train(args, T, model, shared_model, shared_average_model, optimiser, polici
       policy_loss += _trust_region_loss(model, policies[i].gather(1, actions[i]) + 1e-10, average_policies[i].gather(1, actions[i]) + 1e-10, single_step_policy_loss, args.trust_region_threshold, g, k)
     else:
       # Policy update dθ ← dθ + ∂θ/∂θ∙g
-      policy_loss += single_step_policy_loss
+      if not args.KL:
+        policy_loss += single_step_policy_loss
 
     # Entropy regularisation dθ ← dθ + β∙∇θH(π(s_i; θ))
-    policy_loss -= args.entropy_weight * -(policies[i].log() * policies[i]).sum(1).mean(0)  # Sum over probabilities, average over batch
+    if not args.KL:
+        policy_loss -= args.entropy_weight * -(policies[i].log() * policies[i]).sum(1).mean(0)  # Sum over probabilities, average over batch
 
     # Value update dθ ← dθ - ∇θ∙1/2∙(Qret - Q(s_i, a_i; θ))^2
     Q = Qs[i].gather(1, actions[i])
@@ -130,7 +143,12 @@ def _train(args, T, model, shared_model, shared_average_model, optimiser, polici
     truncated_rho = rho.gather(1, actions[i]).clamp(max=1)
     # Qret ← ρ¯_a_i∙(Qret - Q(s_i, a_i; θ)) + V(s_i; θ)
     Qret = truncated_rho * (Qret - Q.detach()) + Vs[i].detach()
-
+  if args.KL:
+    for state in target_theta:
+        pi_s_new = Categorical(F.softmax(target_theta[state], dim=-1))
+        pi_s_old = Categorical(policies[i][0])
+        policy_loss += torch.distributions.kl_divergence(pi_s_old, pi_s_new).mean()
+        print(policy_loss)
   # Update networks
   _update_networks(args, T, model, shared_model, shared_average_model, policy_loss + value_loss, optimiser)
 
@@ -141,17 +159,20 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
 
   env = gym.make(args.env)
   env.seed(args.seed + rank)
+  print("a")
   model = ActorCritic(env.observation_space, env.action_space, args.hidden_size)
+  print("b")
   model.train()
-
+  print("c")
   if not args.on_policy:
     # Normalise memory capacity by number of training processes
     memory = EpisodicReplayMemory(args.memory_capacity // args.num_processes, args.max_episode_length)
 
   t = 1  # Thread step counter
   done = True  # Start new episode
-
+  print(t)
   while T.value() <= args.T_max:
+    print("loop")
     # On-policy episode loop
     while True:
       # Sync with shared model at least every t_max steps
@@ -172,18 +193,20 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
         cx = cx.detach()
 
       # Lists of outputs for training
-      policies, Qs, Vs, actions, rewards, average_policies = [], [], [], [], [], []
+      policies, Qs, Vs, actions, rewards, average_policies, states, thetas = [], [], [], [], [], [], [], []
 
       while not done and t - t_start < args.t_max:
         # Calculate policy and values
-        policy, Q, V, (hx, cx) = model(state, (hx, cx))
-        average_policy, _, _, (avg_hx, avg_cx) = shared_average_model(state, (avg_hx, avg_cx))
+        policy, Q, V, (hx, cx), theta_s = model(state, (hx, cx))
+        average_policy, _, _, (avg_hx, avg_cx), _ = shared_average_model(state, (avg_hx, avg_cx))
 
         # Sample action
         action = torch.multinomial(policy, 1)[0, 0]
 
         # Step
         next_state, reward, done, _ = env.step(action.item())
+        if args.env == "MountainCar-v0":
+            reward += next_state[0]
         next_state = state_to_tensor(next_state)
         reward = args.reward_clip and min(max(reward, -1), 1) or reward  # Optionally clamp rewards
         done = done or episode_length >= args.max_episode_length  # Stop episodes at a max length
@@ -193,12 +216,13 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
           # Save (beginning part of) transition for offline training
           memory.append(state, action, reward, policy.detach())  # Save just tensors
         # Save outputs for online training
-        [arr.append(el) for arr, el in zip((policies, Qs, Vs, actions, rewards, average_policies),
-                                           (policy, Q, V, torch.LongTensor([[action]]), torch.Tensor([[reward]]), average_policy))]
+        [arr.append(el) for arr, el in zip((policies, Qs, Vs, actions, rewards, average_policies, states, thetas),
+                                           (policy, Q, V, torch.LongTensor([[action]]), torch.Tensor([[reward]]), average_policy, state, theta_s))]
 
         # Increment counters
         t += 1
         T.increment()
+        
 
         # Update state
         state = next_state
@@ -213,11 +237,11 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
           memory.append(state, None, None, None)
       else:
         # Qret = V(s_i; θ) for non-terminal s
-        _, _, Qret, _ = model(state, (hx, cx))
+        _, _, Qret, _ , _= model(state, (hx, cx))
         Qret = Qret.detach()
 
       # Train the network on-policy
-      _train(args, T, model, shared_model, shared_average_model, optimiser, policies, Qs, Vs, actions, rewards, Qret, average_policies)
+      _train(args, T, model, shared_model, shared_average_model, optimiser, policies, Qs, Vs, actions, rewards, Qret, average_policies, states, thetas)
 
       # Finish on-policy episode
       if done:
@@ -235,7 +259,7 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
         cx, avg_cx = torch.zeros(args.batch_size, args.hidden_size), torch.zeros(args.batch_size, args.hidden_size)
 
         # Lists of outputs for training
-        policies, Qs, Vs, actions, rewards, old_policies, average_policies = [], [], [], [], [], [], []
+        policies, Qs, Vs, actions, rewards, old_policies, average_policies, states, thetas = [], [], [], [], [], [], [], [], []
 
         # Loop over trajectories (bar last timestep)
         for i in range(len(trajectories) - 1):
@@ -246,12 +270,12 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
           old_policy = torch.cat(tuple(trajectory.policy for trajectory in trajectories[i]), 0)
 
           # Calculate policy and values
-          policy, Q, V, (hx, cx) = model(state, (hx, cx))
+          policy, Q, V, (hx, cx), theta_s = model(state, (hx, cx))
           average_policy, _, _, (avg_hx, avg_cx) = shared_average_model(state, (avg_hx, avg_cx))
 
           # Save outputs for offline training
-          [arr.append(el) for arr, el in zip((policies, Qs, Vs, actions, rewards, average_policies, old_policies),
-                                             (policy, Q, V, action, reward, average_policy, old_policy))]
+          [arr.append(el) for arr, el in zip((policies, Qs, Vs, actions, rewards, average_policies, old_policies, states, thetas),
+                                             (policy, Q, V, action, reward, average_policy, old_policy, state, theta_s))]
 
           # Unpack second half of transition
           next_state = torch.cat(tuple(trajectory.state for trajectory in trajectories[i + 1]), 0)
@@ -264,7 +288,7 @@ def train(rank, args, T, shared_model, shared_average_model, optimiser):
 
         # Train the network off-policy
         _train(args, T, model, shared_model, shared_average_model, optimiser, policies, Qs, Vs,
-               actions, rewards, Qret, average_policies, old_policies=old_policies)
+               actions, rewards, Qret, average_policies, states, thetas, old_policies=old_policies)
     done = True
 
   env.close()
